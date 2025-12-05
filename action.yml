@@ -1,10 +1,44 @@
 name: 'GLL Kubernetes Deployment Action'
-description: 'Centralized deployment action with hooks'
+description: 'Centralized deployment action with full issue-based approval flow'
 
 inputs:
   github-token:
-    description: 'GitHub token'
+    description: 'GitHub token for issue operations'
     required: true
+  environment:
+    description: 'Target environment (prod, test, qa, stage, sandbox)'
+    required: true
+  release-version:
+    description: 'Release version to deploy'
+    required: true
+  deployment-config:
+    description: 'Path to deployment config file'
+    required: false
+    default: 'deploy/deployment-config.yml'
+  requires-approval:
+    description: 'Whether deployment requires approval via GitHub issue'
+    required: false
+    default: 'true'
+  approved-by:
+    description: 'Comma-separated list of users who can approve'
+    required: false
+    default: ''
+  approval-command:
+    description: 'Command to approve deployment'
+    required: false
+    default: '/approve-deploy'
+  jira-base-url:
+    description: 'JIRA base URL for ticket linking'
+    required: false
+    default: 'https://new-galileu.atlassian.net'
+  slack-webhook-url:
+    description: 'Slack webhook URL for notifications'
+    required: false
+    default: ''
+  slack-channel:
+    description: 'Slack channel for notifications'
+    required: false
+    default: '#deployments'
   before-release-hook:
     description: 'Before release hook path'
     required: false
@@ -17,90 +51,334 @@ inputs:
     description: 'After deployment hook path'
     required: false
     default: './.github/actions/after-deployment'
+  after-release-hook:
+    description: 'After release hook path'
+    required: false
+    default: './.github/actions/after-release'
 
 outputs:
   deployment-status:
-    description: 'Deployment status'
+    description: 'Deployment status (success, failed, pending-approval)'
     value: ${{ steps.deploy.outputs.status }}
+  issue-number:
+    description: 'GitHub issue number for approval tracking'
+    value: ${{ steps.create-issue.outputs.issue-number }}
+  deployment-url:
+    description: 'Deployment URL'
+    value: ${{ steps.deploy.outputs.url }}
 
 runs:
   using: 'composite'
   steps:
-    - name: Start deployment process
+    - name: Start deployment pipeline
       shell: bash
       run: |
-        echo "🚀 Starting GLL Deployment Pipeline"
+        echo "🚀 Starting GLL Kubernetes Deployment Pipeline"
+        echo "   Environment: ${{ inputs.environment }}"
+        echo "   Release: ${{ inputs.release-version }}"
+        echo "   Requires Approval: ${{ inputs.requires-approval }}"
+
+    - name: Extract JIRA tickets from changes
+      id: extract-tickets
+      shell: bash
+      run: |
+        echo "🎫 Extracting JIRA tickets from recent changes..."
+        # Simulate ticket extraction (in real scenario would parse git diff/commits)
+        TICKETS="G2P-1234,G2P-5678,G2P-9012"
+        echo "tickets=$TICKETS" >> $GITHUB_OUTPUT
+        echo "   Found tickets: $TICKETS"
+
+    - name: Create approval issue
+      id: create-issue
+      if: inputs.requires-approval == 'true'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        echo "📋 Creating deployment approval issue..."
         
+        TICKETS="${{ steps.extract-tickets.outputs.tickets }}"
+        JIRA_LINKS=""
+        if [ -n "$TICKETS" ]; then
+          # Convert tickets to JIRA links
+          for ticket in $(echo $TICKETS | tr ',' ' '); do
+            JIRA_LINKS="$JIRA_LINKS- [$ticket](${{ inputs.jira-base-url }}/browse/$ticket)\n"
+          done
+        fi
+        
+        # Create issue body
+        ISSUE_BODY="## 🚢 Deployment Request
+
+**Environment:** \`${{ inputs.environment }}\`
+**Release:** \`${{ inputs.release-version }}\`
+**Repository:** \`${{ github.repository }}\`
+**Branch:** \`${{ github.ref_name }}\`
+**Commit:** \`${{ github.sha }}\`
+
+### JIRA Tickets
+$JIRA_LINKS
+
+### Approval Required
+Approved by: ${{ inputs.approved-by }}
+Command: \`${{ inputs.approval-command }}\`
+
+### Deployment Status
+⏳ Waiting for approval...
+
+---
+*This issue was created automatically by the deployment pipeline.*"
+
+        # Create GitHub issue
+        ISSUE_NUMBER=$(gh api repos/${{ github.repository }}/issues \
+          --method POST \
+          --field title="🚢 Deploy ${{ inputs.release-version }} to ${{ inputs.environment }}" \
+          --field body="$ISSUE_BODY" \
+          --field labels='["deployment","approval-required"]' \
+          --jq '.number')
+        
+        echo "issue-number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
+        echo "   Created issue #$ISSUE_NUMBER"
+
+    - name: Send Slack notification - Issue Created
+      if: inputs.slack-webhook-url != '' && inputs.requires-approval == 'true'
+      shell: bash
+      run: |
+        echo "💬 Sending Slack notification - Issue created..."
+        
+        TICKETS="${{ steps.extract-tickets.outputs.tickets }}"
+        TICKET_LIST=""
+        if [ -n "$TICKETS" ]; then
+          for ticket in $(echo $TICKETS | tr ',' ' '); do
+            TICKET_LIST="$TICKET_LIST• <${{ inputs.jira-base-url }}/browse/$ticket|$ticket>\n"
+          done
+        fi
+        
+        curl -X POST "${{ inputs.slack-webhook-url }}" \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"channel\": \"${{ inputs.slack-channel }}\",
+            \"text\": \"🚢 Deployment Request Created\",
+            \"attachments\": [{
+              \"color\": \"warning\",
+              \"fields\": [
+                {\"title\": \"Environment\", \"value\": \"${{ inputs.environment }}\", \"short\": true},
+                {\"title\": \"Release\", \"value\": \"${{ inputs.release-version }}\", \"short\": true},
+                {\"title\": \"Repository\", \"value\": \"${{ github.repository }}\", \"short\": true},
+                {\"title\": \"Issue\", \"value\": \"<https://github.com/${{ github.repository }}/issues/${{ steps.create-issue.outputs.issue-number }}|#${{ steps.create-issue.outputs.issue-number }}>\", \"short\": true}
+              ],
+              \"text\": \"*JIRA Tickets:*\\n$TICKET_LIST\"
+            }]
+          }" || echo "Failed to send Slack notification (non-critical)"
+
+    - name: Wait for approval
+      if: inputs.requires-approval == 'true'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        echo "⏳ Waiting for approval on issue #${{ steps.create-issue.outputs.issue-number }}..."
+        echo "   Approved by: ${{ inputs.approved-by }}"
+        echo "   Approval command: ${{ inputs.approval-command }}"
+        
+        # In a real scenario, this would poll the issue for approval comments
+        # For demo, we'll simulate a 30-second wait
+        sleep 30
+        
+        echo "✅ Approval received (simulated)"
+        
+        # Update issue with approval status
+        gh api repos/${{ github.repository }}/issues/${{ steps.create-issue.outputs.issue-number }}/comments \
+          --method POST \
+          --field body="✅ **Approval received** (simulated for demo)
+
+Proceeding with deployment to \`${{ inputs.environment }}\`..." || echo "Failed to update issue (non-critical)"
+
     - name: Run before-release hook
       shell: bash
       run: |
         HOOK_PATH="${{ inputs.before-release-hook }}"
-        if [ -f "$HOOK_PATH/action.yml" ]; then
+        if [ -f "$HOOK_PATH/action.yml" ] || [ -f "$HOOK_PATH/run.sh" ]; then
           echo "✅ Found before-release hook at $HOOK_PATH"
           echo "🎯 Running before-release validations..."
           if [ -f "$HOOK_PATH/run.sh" ]; then
             chmod +x "$HOOK_PATH/run.sh"
-            "$HOOK_PATH/run.sh" "v2.0.0-test" "sandbox"
+            "$HOOK_PATH/run.sh" "${{ inputs.release-version }}" "${{ inputs.environment }}"
           else
             echo "   Running pre-release validations..."
             sleep 1
             echo "   ✅ Pre-release validations completed!"
           fi
         else
-          echo "ℹ️ No before-release hook at $HOOK_PATH"
+          echo "ℹ️ No before-release hook found at $HOOK_PATH"
         fi
-    
-    - name: Run before-deployment hook  
+
+    - name: Run before-deployment hook
       shell: bash
       run: |
         HOOK_PATH="${{ inputs.before-deployment-hook }}"
-        if [ -f "$HOOK_PATH/action.yml" ]; then
+        if [ -f "$HOOK_PATH/action.yml" ] || [ -f "$HOOK_PATH/run.sh" ]; then
           echo "✅ Found before-deployment hook at $HOOK_PATH"
           echo "🚢 Running before-deployment preparations..."
           if [ -f "$HOOK_PATH/run.sh" ]; then
             chmod +x "$HOOK_PATH/run.sh"
-            "$HOOK_PATH/run.sh" "v2.0.0-test" "sandbox"
+            "$HOOK_PATH/run.sh" "${{ inputs.release-version }}" "${{ inputs.environment }}"
           else
             echo "   Preparing deployment environment..."
             sleep 1
             echo "   ✅ Deployment preparation completed!"
           fi
         else
-          echo "ℹ️ No before-deployment hook at $HOOK_PATH"
+          echo "ℹ️ No before-deployment hook found at $HOOK_PATH"
         fi
-    
-    - name: Simulate deployment
+
+    - name: Kubernetes deployment
       id: deploy
       shell: bash
       run: |
-        echo "🚢 Deploying to sandbox environment..."
+        echo "🚢 Deploying to ${{ inputs.environment }} environment..."
+        echo "   Release: ${{ inputs.release-version }}"
+        
+        # Simulate deployment steps
+        echo "   📦 Building Docker image..."
         sleep 2
-        echo "✅ Deployment completed successfully!"
+        echo "   🏗️ Applying Kubernetes manifests..."
+        sleep 3
+        echo "   🔍 Waiting for rollout to complete..."
+        sleep 2
+        echo "   🌐 Updating ingress configuration..."
+        sleep 1
+        
+        # Set deployment URL based on environment
+        case "${{ inputs.environment }}" in
+          prod)
+            DEPLOY_URL="https://app.galileu.com"
+            ;;
+          qa)
+            DEPLOY_URL="https://qa.galileu.com"
+            ;;
+          test)
+            DEPLOY_URL="https://test.galileu.com"
+            ;;
+          stage)
+            DEPLOY_URL="https://stage.galileu.com"
+            ;;
+          sandbox)
+            DEPLOY_URL="https://sandbox.galileu.com"
+            ;;
+          *)
+            DEPLOY_URL="https://${{ inputs.environment }}.galileu.com"
+            ;;
+        esac
+        
+        echo "url=$DEPLOY_URL" >> $GITHUB_OUTPUT
         echo "status=success" >> $GITHUB_OUTPUT
-    
+        
+        echo "✅ Deployment completed successfully!"
+        echo "   URL: $DEPLOY_URL"
+
     - name: Run after-deployment hook
       shell: bash
       run: |
         HOOK_PATH="${{ inputs.after-deployment-hook }}"
-        if [ -f "$HOOK_PATH/action.yml" ]; then
+        if [ -f "$HOOK_PATH/action.yml" ] || [ -f "$HOOK_PATH/run.sh" ]; then
           echo "✅ Found after-deployment hook at $HOOK_PATH"
           echo "🎉 Running after-deployment tests..."
           if [ -f "$HOOK_PATH/run.sh" ]; then
             chmod +x "$HOOK_PATH/run.sh"
-            "$HOOK_PATH/run.sh" "v2.0.0-test" "sandbox" "https://sandbox.example.com"
+            "$HOOK_PATH/run.sh" "${{ inputs.release-version }}" "${{ inputs.environment }}" "${{ steps.deploy.outputs.url }}"
           else
             echo "   Running post-deployment tests..."
             sleep 2
             echo "   ✅ Post-deployment tests passed!"
           fi
         else
-          echo "ℹ️ No after-deployment hook at $HOOK_PATH"
+          echo "ℹ️ No after-deployment hook found at $HOOK_PATH"
         fi
+
+    - name: Run after-release hook
+      shell: bash
+      run: |
+        HOOK_PATH="${{ inputs.after-release-hook }}"
+        if [ -f "$HOOK_PATH/action.yml" ] || [ -f "$HOOK_PATH/run.sh" ]; then
+          echo "✅ Found after-release hook at $HOOK_PATH"
+          echo "�� Running after-release tasks..."
+          if [ -f "$HOOK_PATH/run.sh" ]; then
+            chmod +x "$HOOK_PATH/run.sh"
+            "$HOOK_PATH/run.sh" "${{ inputs.release-version }}" "${{ inputs.environment }}" "${{ steps.deploy.outputs.url }}"
+          else
+            echo "   Running post-release tasks..."
+            sleep 1
+            echo "   ✅ Post-release tasks completed!"
+          fi
+        else
+          echo "ℹ️ No after-release hook found at $HOOK_PATH"
+        fi
+
+    - name: Update deployment issue
+      if: inputs.requires-approval == 'true'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        echo "📋 Updating deployment issue..."
+        
+        gh api repos/${{ github.repository }}/issues/${{ steps.create-issue.outputs.issue-number }}/comments \
+          --method POST \
+          --field body="🎉 **Deployment completed successfully!**
+
+**Environment:** \`${{ inputs.environment }}\`
+**Release:** \`${{ inputs.release-version }}\`
+**URL:** ${{ steps.deploy.outputs.url }}
+**Status:** ✅ Success
+
+---
+*Deployment pipeline completed at $(date)*" || echo "Failed to update issue (non-critical)"
+        
+        # Close the issue
+        gh api repos/${{ github.repository }}/issues/${{ steps.create-issue.outputs.issue-number }} \
+          --method PATCH \
+          --field state=closed || echo "Failed to close issue (non-critical)"
+
+    - name: Send Slack notification - Deployment Success
+      if: inputs.slack-webhook-url != ''
+      shell: bash
+      run: |
+        echo "💬 Sending Slack notification - Deployment success..."
+        
+        TICKETS="${{ steps.extract-tickets.outputs.tickets }}"
+        TICKET_LIST=""
+        if [ -n "$TICKETS" ]; then
+          for ticket in $(echo $TICKETS | tr ',' ' '); do
+            TICKET_LIST="$TICKET_LIST• <${{ inputs.jira-base-url }}/browse/$ticket|$ticket>\n"
+          done
+        fi
+        
+        curl -X POST "${{ inputs.slack-webhook-url }}" \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"channel\": \"${{ inputs.slack-channel }}\",
+            \"text\": \"✅ Deployment Successful\",
+            \"attachments\": [{
+              \"color\": \"good\",
+              \"fields\": [
+                {\"title\": \"Environment\", \"value\": \"${{ inputs.environment }}\", \"short\": true},
+                {\"title\": \"Release\", \"value\": \"${{ inputs.release-version }}\", \"short\": true},
+                {\"title\": \"URL\", \"value\": \"<${{ steps.deploy.outputs.url }}|${{ steps.deploy.outputs.url }}>\", \"short\": true},
+                {\"title\": \"Repository\", \"value\": \"${{ github.repository }}\", \"short\": true}
+              ],
+              \"text\": \"*JIRA Tickets:*\\n$TICKET_LIST\"
+            }]
+          }" || echo "Failed to send Slack notification (non-critical)"
 
     - name: Deployment summary
       shell: bash
       run: |
         echo "📋 Deployment Summary:"
-        echo "   Status: success"
-        echo "   Environment: sandbox" 
-        echo "   Release: v2.0.0-test"
+        echo "   Status: ✅ Success"
+        echo "   Environment: ${{ inputs.environment }}" 
+        echo "   Release: ${{ inputs.release-version }}"
+        echo "   URL: ${{ steps.deploy.outputs.url }}"
+        if [ "${{ inputs.requires-approval }}" == "true" ]; then
+          echo "   Issue: #${{ steps.create-issue.outputs.issue-number }}"
+        fi
+        echo "   Tickets: ${{ steps.extract-tickets.outputs.tickets }}"

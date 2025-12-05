@@ -1,0 +1,379 @@
+name: 'GLL Kubernetes Deployment Action'
+description: 'Complete deployment pipeline with issue-based approval flow for GitOps'
+author: 'GLL Sistemas'
+
+inputs:
+  # Core Configuration
+  deployment-config-path:
+    description: 'Path to deployment configuration file'
+    required: false
+    default: 'deploy/deployment-config.yml'
+  
+  github-token:
+    description: 'GitHub token for API access'
+    required: true
+  
+  # AWS Configuration  
+  aws-access-key-id:
+    description: 'AWS access key ID for EKS deployment'
+    required: true
+  
+  aws-secret-access-key:
+    description: 'AWS secret access key for EKS deployment'  
+    required: true
+  
+  aws-region:
+    description: 'AWS region for EKS cluster'
+    required: false
+    default: 'sa-east-1'
+  
+  eks-cluster-name:
+    description: 'EKS cluster name for deployment'
+    required: true
+  
+  # Docker Configuration
+  docker-registry:
+    description: 'Docker registry URL'
+    required: true
+  
+  docker-repository:
+    description: 'Docker repository name'
+    required: true
+  
+  # Hook Configuration (Optional)
+  before-release-hook:
+    description: 'Path to before-release hook action (default: ./.github/actions/before-release)'
+    required: false
+    default: './.github/actions/before-release'
+  
+  before-deployment-hook:
+    description: 'Path to before-deployment hook action (default: ./.github/actions/before-deployment)'
+    required: false
+    default: './.github/actions/before-deployment'
+  
+  after-deployment-hook:
+    description: 'Path to after-deployment hook action'
+    required: false
+    default: './.github/actions/after-deployment'
+  
+  after-release-hook:
+    description: 'Path to after-release hook action'
+    required: false
+    default: './.github/actions/after-release'
+  
+  # Slack Configuration (Optional - uses deployment config if not provided)
+  slack-webhook:
+    description: 'Slack webhook URL (overrides config)'
+    required: false
+  
+  slack-channel:
+    description: 'Slack channel for notifications (overrides config)'
+    required: false
+  
+  # Advanced Options
+  target-environment:
+    description: 'Force specific target environment (for manual dispatch)'
+    required: false
+  
+  skip-validation:
+    description: 'Skip branch validation (admin only)'
+    required: false
+    default: 'false'
+  
+  dry-run:
+    description: 'Run in dry-run mode (no actual deployment)'
+    required: false
+    default: 'false'
+
+outputs:
+  # Deployment Results
+  deployment-status:
+    description: 'Final deployment status (success/failure/skipped)'
+    value: ${{ steps.deploy.outputs.status }}
+  
+  deployment-url:
+    description: 'URL of the deployed application'
+    value: ${{ steps.deploy.outputs.url }}
+  
+  environment:
+    description: 'Target environment that was deployed'
+    value: ${{ steps.validate.outputs.environment }}
+  
+  # Release Information
+  release-tag:
+    description: 'Generated release tag'
+    value: ${{ steps.create-release.outputs.tag }}
+  
+  release-url:
+    description: 'GitHub release URL'
+    value: ${{ steps.create-release.outputs.url }}
+  
+  release-notes:
+    description: 'Generated release notes'
+    value: ${{ steps.create-release.outputs.notes }}
+  
+  # Issue Management
+  issue-number:
+    description: 'Created deployment issue number'
+    value: ${{ steps.manage-issue.outputs.issue-number }}
+  
+  issue-url:
+    description: 'Created deployment issue URL'
+    value: ${{ steps.manage-issue.outputs.issue-url }}
+  
+  approval-status:
+    description: 'Approval status (approved/pending/auto-approved)'
+    value: ${{ steps.approval.outputs.status }}
+  
+  # JIRA Integration
+  jira-tickets:
+    description: 'Extracted JIRA tickets (JSON array)'
+    value: ${{ steps.extract-tickets.outputs.tickets }}
+  
+  jira-tickets-formatted:
+    description: 'Formatted JIRA tickets for display'
+    value: ${{ steps.extract-tickets.outputs.formatted }}
+
+runs:
+  using: 'composite'
+  steps:
+    # 1. Environment Setup and Validation
+    - name: Setup Environment
+      shell: bash
+      run: |
+        echo "🚀 Starting GLL Kubernetes Deployment Pipeline"
+        echo "Event: ${{ github.event_name }}"
+        echo "Ref: ${{ github.ref }}"
+        echo "SHA: ${{ github.sha }}"
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+    
+    - name: Install Dependencies
+      shell: bash
+      run: |
+        npm install js-yaml @octokit/rest
+    
+    # 2. Load Configuration (Security: always from master branch)
+    - name: Load Deployment Configuration
+      shell: bash
+      run: |
+        echo "Loading deployment configuration from master branch..."
+        git fetch origin master:refs/remotes/origin/master || true
+        if git show origin/master:${{ inputs.deployment-config-path }} > deployment-config.yml 2>/dev/null; then
+          echo "✅ Loaded config from master branch"
+        elif [ -f "${{ inputs.deployment-config-path }}" ]; then
+          cp "${{ inputs.deployment-config-path }}" deployment-config.yml
+          echo "⚠️ Using config from current branch"
+        else
+          echo "❌ Configuration file not found"
+          exit 1
+        fi
+    
+    # 3. Handle Issue Comment Approval (if applicable)
+    - name: Check Approval Comment
+      id: check-approval
+      if: github.event_name == 'issue_comment'
+      uses: ${{ github.action_path }}/src/actions/check-approval-comment
+      with:
+        github-token: ${{ inputs.github-token }}
+    
+    # 4. Validate Branch and Determine Environment
+    - name: Validate Branch and Environment
+      id: validate
+      uses: ${{ github.action_path }}/src/actions/validate-deployment
+      with:
+        github-token: ${{ inputs.github-token }}
+        config-path: deployment-config.yml
+        target-environment: ${{ inputs.target-environment }}
+        skip-validation: ${{ inputs.skip-validation }}
+        approval-data: ${{ steps.check-approval.outputs.data }}
+    
+    # 5. Extract JIRA Tickets
+    - name: Extract JIRA Tickets
+      id: extract-tickets
+      uses: ${{ github.action_path }}/src/actions/extract-jira-tickets
+      with:
+        github-token: ${{ inputs.github-token }}
+        config-path: deployment-config.yml
+        source-branch: ${{ steps.validate.outputs.source-branch }}
+        target-branch: ${{ steps.validate.outputs.target-branch }}
+        reference-branch: ${{ steps.validate.outputs.reference-branch }}
+    
+    # 6. Before Release Hook
+    - name: Check before-release hook
+      id: check-before-release-hook
+      shell: bash
+      run: |
+        if [ -f "${{ inputs.before-release-hook }}/action.yml" ]; then
+          echo "exists=true" >> $GITHUB_OUTPUT
+          echo "✅ Found before-release hook at ${{ inputs.before-release-hook }}"
+        else
+          echo "exists=false" >> $GITHUB_OUTPUT
+          echo "ℹ️ No before-release hook found"
+        fi
+    
+    - name: Run before-release hook
+      if: steps.check-before-release-hook.outputs.exists == 'true'
+      uses: ${{ inputs.before-release-hook }}
+      with:
+        release: ${{ steps.validate.outputs.next-version }}
+        environment: ${{ steps.validate.outputs.environment }}
+        secrets-as-json: ${{ toJSON(secrets) }}
+    
+    # 7. Create Release
+    - name: Create Release
+      id: create-release
+      if: steps.validate.outputs.should-create-release == 'true'
+      uses: ${{ github.action_path }}/src/actions/create-release
+      with:
+        github-token: ${{ inputs.github-token }}
+        config-path: deployment-config.yml
+        environment: ${{ steps.validate.outputs.environment }}
+        jira-tickets: ${{ steps.extract-tickets.outputs.tickets }}
+    
+    # 8. After Release Hook
+    - name: Check after-release hook
+      id: check-after-release-hook
+      shell: bash
+      run: |
+        if [ -f "${{ inputs.after-release-hook }}/action.yml" ]; then
+          echo "exists=true" >> $GITHUB_OUTPUT
+          echo "✅ Found after-release hook at ${{ inputs.after-release-hook }}"
+        else
+          echo "exists=false" >> $GITHUB_OUTPUT
+          echo "ℹ️ No after-release hook found"
+        fi
+    
+    - name: Run after-release hook
+      if: steps.check-after-release-hook.outputs.exists == 'true'
+      uses: ${{ inputs.after-release-hook }}
+      with:
+        release: ${{ steps.create-release.outputs.tag }}
+        environment: ${{ steps.validate.outputs.environment }}
+        secrets-as-json: ${{ toJSON(secrets) }}
+    
+    # 9. Create or Find Deployment Issue
+    - name: Manage Deployment Issue
+      id: manage-issue
+      uses: ${{ github.action_path }}/src/actions/manage-deployment-issue
+      with:
+        github-token: ${{ inputs.github-token }}
+        config-path: deployment-config.yml
+        release-tag: ${{ steps.create-release.outputs.tag }}
+        environment: ${{ steps.validate.outputs.environment }}
+        requires-approval: ${{ steps.validate.outputs.requires-approval }}
+        jira-tickets: ${{ steps.extract-tickets.outputs.formatted }}
+        is-manual: ${{ github.event_name == 'workflow_dispatch' }}
+    
+    # 10. Handle Approval Flow
+    - name: Process Approval
+      id: approval
+      uses: ${{ github.action_path }}/src/actions/process-approval
+      with:
+        github-token: ${{ inputs.github-token }}
+        config-path: deployment-config.yml
+        issue-number: ${{ steps.manage-issue.outputs.issue-number }}
+        environment: ${{ steps.validate.outputs.environment }}
+        approval-data: ${{ steps.check-approval.outputs.data }}
+    
+    # 11. Before Deployment Hook
+    - name: Check before-deployment hook
+      id: check-before-deployment-hook
+      shell: bash
+      run: |
+        if [ -f "${{ inputs.before-deployment-hook }}/action.yml" ]; then
+          echo "exists=true" >> $GITHUB_OUTPUT
+          echo "✅ Found before-deployment hook at ${{ inputs.before-deployment-hook }}"
+        else
+          echo "exists=false" >> $GITHUB_OUTPUT
+          echo "ℹ️ No before-deployment hook found"
+        fi
+    
+    - name: Run before-deployment hook
+      if: steps.check-before-deployment-hook.outputs.exists == 'true' && steps.approval.outputs.should-deploy == 'true'
+      uses: ${{ inputs.before-deployment-hook }}
+      with:
+        release: ${{ steps.create-release.outputs.tag }}
+        environment: ${{ steps.validate.outputs.environment }}
+        secrets-as-json: ${{ toJSON(secrets) }}
+    
+    # 12. Deploy to EKS
+    - name: Deploy to EKS
+      id: deploy
+      if: steps.approval.outputs.should-deploy == 'true' && inputs.dry-run != 'true'
+      uses: ${{ github.action_path }}/src/actions/deploy-eks
+      with:
+        aws-access-key-id: ${{ inputs.aws-access-key-id }}
+        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
+        aws-region: ${{ inputs.aws-region }}
+        eks-cluster-name: ${{ inputs.eks-cluster-name }}
+        docker-registry: ${{ inputs.docker-registry }}
+        docker-repository: ${{ inputs.docker-repository }}
+        release-tag: ${{ steps.create-release.outputs.tag }}
+        environment: ${{ steps.validate.outputs.environment }}
+        config-path: deployment-config.yml
+    
+    # 13. After Deployment Hook
+    - name: Check after-deployment hook
+      id: check-after-deployment-hook
+      shell: bash
+      run: |
+        if [ -f "${{ inputs.after-deployment-hook }}/action.yml" ]; then
+          echo "exists=true" >> $GITHUB_OUTPUT
+          echo "✅ Found after-deployment hook at ${{ inputs.after-deployment-hook }}"
+        else
+          echo "exists=false" >> $GITHUB_OUTPUT
+          echo "ℹ️ No after-deployment hook found"
+        fi
+    
+    - name: Run after-deployment hook
+      if: steps.check-after-deployment-hook.outputs.exists == 'true' && steps.deploy.outputs.status == 'success'
+      uses: ${{ inputs.after-deployment-hook }}
+      with:
+        release: ${{ steps.create-release.outputs.tag }}
+        environment: ${{ steps.validate.outputs.environment }}
+        deployment-url: ${{ steps.deploy.outputs.url }}
+        secrets-as-json: ${{ toJSON(secrets) }}
+    
+    # 14. Update Issue with Results
+    - name: Update Deployment Issue
+      if: always() && steps.manage-issue.outputs.issue-number != ''
+      uses: ${{ github.action_path }}/src/actions/update-deployment-issue
+      with:
+        github-token: ${{ inputs.github-token }}
+        issue-number: ${{ steps.manage-issue.outputs.issue-number }}
+        deployment-status: ${{ steps.deploy.outputs.status || 'skipped' }}
+        deployment-url: ${{ steps.deploy.outputs.url }}
+        error-message: ${{ steps.deploy.outputs.error }}
+    
+    # 15. Send Slack Notifications
+    - name: Send Slack Notification
+      if: always()
+      uses: ${{ github.action_path }}/src/actions/send-slack-notification
+      with:
+        config-path: deployment-config.yml
+        environment: ${{ steps.validate.outputs.environment }}
+        release-tag: ${{ steps.create-release.outputs.tag }}
+        deployment-status: ${{ steps.deploy.outputs.status || 'skipped' }}
+        deployment-url: ${{ steps.deploy.outputs.url }}
+        issue-url: ${{ steps.manage-issue.outputs.issue-url }}
+        jira-tickets: ${{ steps.extract-tickets.outputs.formatted }}
+        slack-webhook-override: ${{ inputs.slack-webhook }}
+        slack-channel-override: ${{ inputs.slack-channel }}
+    
+    # 16. Handle Promotion Pipeline
+    - name: Create Promotion Issues
+      if: steps.deploy.outputs.status == 'success'
+      uses: ${{ github.action_path }}/src/actions/create-promotion-pipeline
+      with:
+        github-token: ${{ inputs.github-token }}
+        config-path: deployment-config.yml
+        environment: ${{ steps.validate.outputs.environment }}
+        release-tag: ${{ steps.create-release.outputs.tag }}
+
+branding:
+  icon: 'rocket'
+  color: 'blue'

@@ -1,120 +1,34 @@
-name: 'GLL Kubernetes Deployment Action'
-description: 'Minimal test version for validation'
-author: 'GLL Sistemas'
+name: 'GLL Test Action'
+description: 'Ultra simple test version'
 
 inputs:
-  deployment-config-path:
-    description: 'Path to deployment configuration file'
-    required: false
-    default: 'deploy/deployment-config.yml'
-  
   github-token:
-    description: 'GitHub token for API access'
+    description: 'GitHub token'
     required: true
-  
   before-release-hook:
-    description: 'Path to before-release hook action'
+    description: 'Before release hook path'
     required: false
     default: './.github/actions/before-release'
-  
-  before-deployment-hook:
-    description: 'Path to before-deployment hook action'
-    required: false
-    default: './.github/actions/before-deployment'
-  
-  after-deployment-hook:
-    description: 'Path to after-deployment hook action'
-    required: false
-    default: './.github/actions/after-deployment'
 
 outputs:
-  deployment-status:
-    description: 'Final deployment status'
-    value: ${{ steps.simulate.outputs.status }}
-  
-  environment:
-    description: 'Target environment'
-    value: 'sandbox'
+  status:
+    description: 'Status'
+    value: 'success'
 
 runs:
   using: 'composite'
   steps:
-    - name: Test Centralized Action
+    - name: Simple test
       shell: bash
       run: |
-        echo "🚀 Testing Centralized Action"
-        echo "Config: ${{ inputs.deployment-config-path }}"
+        echo "🚀 Simple test of centralized action"
+        echo "Hook path: ${{ inputs.before-release-hook }}"
         
-    - name: Check before-release hook
-      id: check-before-release
+    - name: Check hook exists
       shell: bash
       run: |
         if [ -f "${{ inputs.before-release-hook }}/action.yml" ]; then
-          echo "exists=true" >> $GITHUB_OUTPUT
-          echo "✅ Found before-release hook at ${{ inputs.before-release-hook }}"
+          echo "✅ Hook found!"
         else
-          echo "exists=false" >> $GITHUB_OUTPUT
-          echo "ℹ️ No before-release hook found"
+          echo "❌ Hook not found"
         fi
-    
-    - name: Run before-release hook
-      if: steps.check-before-release.outputs.exists == 'true'
-      uses: ${{ inputs.before-release-hook }}
-      with:
-        release: "v2.0.0-test"
-        environment: "sandbox"
-        secrets-as-json: "{}"
-    
-    - name: Check before-deployment hook
-      id: check-before-deployment
-      shell: bash
-      run: |
-        if [ -f "${{ inputs.before-deployment-hook }}/action.yml" ]; then
-          echo "exists=true" >> $GITHUB_OUTPUT
-          echo "✅ Found before-deployment hook at ${{ inputs.before-deployment-hook }}"
-        else
-          echo "exists=false" >> $GITHUB_OUTPUT
-          echo "ℹ️ No before-deployment hook found"
-        fi
-    
-    - name: Run before-deployment hook
-      if: steps.check-before-deployment.outputs.exists == 'true'
-      uses: ${{ inputs.before-deployment-hook }}
-      with:
-        release: "v2.0.0-test"
-        environment: "sandbox"
-        secrets-as-json: "{}"
-    
-    - name: Simulate deployment
-      id: simulate
-      shell: bash
-      run: |
-        echo "🚢 [FAKE] Deploying to sandbox environment..."
-        sleep 2
-        echo "✅ [FAKE] Deployment successful!"
-        echo "status=success" >> $GITHUB_OUTPUT
-    
-    - name: Check after-deployment hook
-      id: check-after-deployment
-      shell: bash
-      run: |
-        if [ -f "${{ inputs.after-deployment-hook }}/action.yml" ]; then
-          echo "exists=true" >> $GITHUB_OUTPUT
-          echo "✅ Found after-deployment hook at ${{ inputs.after-deployment-hook }}"
-        else
-          echo "exists=false" >> $GITHUB_OUTPUT
-          echo "ℹ️ No after-deployment hook found"
-        fi
-    
-    - name: Run after-deployment hook
-      if: steps.check-after-deployment.outputs.exists == 'true'
-      uses: ${{ inputs.after-deployment-hook }}
-      with:
-        release: "v2.0.0-test"
-        environment: "sandbox"
-        deployment-url: "https://sandbox.test.local"
-        secrets-as-json: "{}"
-
-branding:
-  icon: 'rocket'
-  color: 'blue'

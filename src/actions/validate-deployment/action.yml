@@ -1,0 +1,26 @@
+name: Validate Deployment
+description: Basic validation for testing
+
+inputs:
+  github-token:
+    required: true
+  config-path:
+    required: true
+
+outputs:
+  environment:
+    description: Target environment
+    value: sandbox
+  should-create-release:
+    description: Should create release
+    value: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Basic validation
+      shell: bash
+      run: |
+        echo "✅ [FAKE] Validation completed"
+        echo "environment=sandbox" >> $GITHUB_OUTPUT
+        echo "should-create-release=false" >> $GITHUB_OUTPUT

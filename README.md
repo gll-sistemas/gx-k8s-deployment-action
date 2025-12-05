@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - uses: gll-sistemas/gx-k8s-deployment-action@v1
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}

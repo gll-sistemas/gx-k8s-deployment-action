@@ -1,4 +1,4 @@
-name: 'GLL Kubernetes Deployment Action (Minimal)'
+name: 'GLL Kubernetes Deployment Action'
 description: 'Minimal test version for validation'
 author: 'GLL Sistemas'
 
@@ -30,7 +30,7 @@ inputs:
 outputs:
   deployment-status:
     description: 'Final deployment status'
-    value: ${{ steps.test.outputs.status }}
+    value: ${{ steps.simulate.outputs.status }}
   
   environment:
     description: 'Target environment'
@@ -40,26 +40,25 @@ runs:
   using: 'composite'
   steps:
     - name: Test Centralized Action
-      id: test
       shell: bash
       run: |
         echo "🚀 Testing Centralized Action"
         echo "Config: ${{ inputs.deployment-config-path }}"
-        echo "status=test-success" >> $GITHUB_OUTPUT
         
     - name: Check before-release hook
-      id: check-before-release-hook
+      id: check-before-release
       shell: bash
       run: |
         if [ -f "${{ inputs.before-release-hook }}/action.yml" ]; then
           echo "exists=true" >> $GITHUB_OUTPUT
-          echo "✅ Found before-release hook"
+          echo "✅ Found before-release hook at ${{ inputs.before-release-hook }}"
         else
           echo "exists=false" >> $GITHUB_OUTPUT
+          echo "ℹ️ No before-release hook found"
         fi
     
     - name: Run before-release hook
-      if: steps.check-before-release-hook.outputs.exists == 'true'
+      if: steps.check-before-release.outputs.exists == 'true'
       uses: ${{ inputs.before-release-hook }}
       with:
         release: "v2.0.0-test"
@@ -67,18 +66,19 @@ runs:
         secrets-as-json: "{}"
     
     - name: Check before-deployment hook
-      id: check-before-deployment-hook
+      id: check-before-deployment
       shell: bash
       run: |
         if [ -f "${{ inputs.before-deployment-hook }}/action.yml" ]; then
           echo "exists=true" >> $GITHUB_OUTPUT
-          echo "✅ Found before-deployment hook"
+          echo "✅ Found before-deployment hook at ${{ inputs.before-deployment-hook }}"
         else
           echo "exists=false" >> $GITHUB_OUTPUT
+          echo "ℹ️ No before-deployment hook found"
         fi
     
     - name: Run before-deployment hook
-      if: steps.check-before-deployment-hook.outputs.exists == 'true'
+      if: steps.check-before-deployment.outputs.exists == 'true'
       uses: ${{ inputs.before-deployment-hook }}
       with:
         release: "v2.0.0-test"
@@ -86,25 +86,28 @@ runs:
         secrets-as-json: "{}"
     
     - name: Simulate deployment
+      id: simulate
       shell: bash
       run: |
-        echo "🚢 [FAKE] Deploying to sandbox environment"
+        echo "🚢 [FAKE] Deploying to sandbox environment..."
         sleep 2
-        echo "✅ [FAKE] Deployment successful"
+        echo "✅ [FAKE] Deployment successful!"
+        echo "status=success" >> $GITHUB_OUTPUT
     
     - name: Check after-deployment hook
-      id: check-after-deployment-hook
+      id: check-after-deployment
       shell: bash
       run: |
         if [ -f "${{ inputs.after-deployment-hook }}/action.yml" ]; then
           echo "exists=true" >> $GITHUB_OUTPUT
-          echo "✅ Found after-deployment hook"
+          echo "✅ Found after-deployment hook at ${{ inputs.after-deployment-hook }}"
         else
           echo "exists=false" >> $GITHUB_OUTPUT
+          echo "ℹ️ No after-deployment hook found"
         fi
     
     - name: Run after-deployment hook
-      if: steps.check-after-deployment-hook.outputs.exists == 'true'
+      if: steps.check-after-deployment.outputs.exists == 'true'
       uses: ${{ inputs.after-deployment-hook }}
       with:
         release: "v2.0.0-test"

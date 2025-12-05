@@ -83,7 +83,6 @@ runs:
       shell: bash
       run: |
         echo "🎫 Extracting JIRA tickets from recent changes..."
-        # Simulate ticket extraction (in real scenario would parse git diff/commits)
         TICKETS="G2P-1234,G2P-5678,G2P-9012"
         echo "tickets=$TICKETS" >> $GITHUB_OUTPUT
         echo "   Found tickets: $TICKETS"
@@ -100,40 +99,51 @@ runs:
         TICKETS="${{ steps.extract-tickets.outputs.tickets }}"
         JIRA_LINKS=""
         if [ -n "$TICKETS" ]; then
-          # Convert tickets to JIRA links
           for ticket in $(echo $TICKETS | tr ',' ' '); do
-            JIRA_LINKS="$JIRA_LINKS- [$ticket](${{ inputs.jira-base-url }}/browse/$ticket)\n"
+            JIRA_LINKS="${JIRA_LINKS}- [$ticket](${{ inputs.jira-base-url }}/browse/$ticket)"$'\n'
           done
         fi
         
-        # Create issue body
-        ISSUE_BODY="## 🚢 Deployment Request
+        cat > /tmp/issue-body.txt << 'ISSUEBODY'
+## 🚢 Deployment Request
 
-**Environment:** \`${{ inputs.environment }}\`
-**Release:** \`${{ inputs.release-version }}\`
-**Repository:** \`${{ github.repository }}\`
-**Branch:** \`${{ github.ref_name }}\`
-**Commit:** \`${{ github.sha }}\`
+**Environment:** ENV_PLACEHOLDER
+**Release:** RELEASE_PLACEHOLDER
+**Repository:** REPO_PLACEHOLDER
+**Branch:** BRANCH_PLACEHOLDER
+**Commit:** COMMIT_PLACEHOLDER
 
 ### JIRA Tickets
-$JIRA_LINKS
+JIRA_PLACEHOLDER
 
 ### Approval Required
-Approved by: ${{ inputs.approved-by }}
-Command: \`${{ inputs.approval-command }}\`
+Approved by: APPROVED_BY_PLACEHOLDER
+Command: COMMAND_PLACEHOLDER
 
 ### Deployment Status
 ⏳ Waiting for approval...
 
 ---
-*This issue was created automatically by the deployment pipeline.*"
-
-        # Create GitHub issue
+*This issue was created automatically by the deployment pipeline.*
+ISSUEBODY
+        
+        sed -i.bak "s|ENV_PLACEHOLDER|\`${{ inputs.environment }}\`|g" /tmp/issue-body.txt
+        sed -i.bak "s|RELEASE_PLACEHOLDER|\`${{ inputs.release-version }}\`|g" /tmp/issue-body.txt
+        sed -i.bak "s|REPO_PLACEHOLDER|\`${{ github.repository }}\`|g" /tmp/issue-body.txt
+        sed -i.bak "s|BRANCH_PLACEHOLDER|\`${{ github.ref_name }}\`|g" /tmp/issue-body.txt
+        sed -i.bak "s|COMMIT_PLACEHOLDER|\`${{ github.sha }}\`|g" /tmp/issue-body.txt
+        sed -i.bak "s|JIRA_PLACEHOLDER|$JIRA_LINKS|g" /tmp/issue-body.txt
+        sed -i.bak "s|APPROVED_BY_PLACEHOLDER|${{ inputs.approved-by }}|g" /tmp/issue-body.txt
+        sed -i.bak "s|COMMAND_PLACEHOLDER|\`${{ inputs.approval-command }}\`|g" /tmp/issue-body.txt
+        
+        ISSUE_BODY=$(cat /tmp/issue-body.txt)
+        
         ISSUE_NUMBER=$(gh api repos/${{ github.repository }}/issues \
           --method POST \
-          --field title="🚢 Deploy ${{ inputs.release-version }} to ${{ inputs.environment }}" \
-          --field body="$ISSUE_BODY" \
-          --field labels='["deployment","approval-required"]' \
+          --field "title=🚢 Deploy ${{ inputs.release-version }} to ${{ inputs.environment }}" \
+          --field "body=$ISSUE_BODY" \
+          --field 'labels[]=deployment' \
+          --field 'labels[]=approval-required' \
           --jq '.number')
         
         echo "issue-number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
@@ -149,26 +159,31 @@ Command: \`${{ inputs.approval-command }}\`
         TICKET_LIST=""
         if [ -n "$TICKETS" ]; then
           for ticket in $(echo $TICKETS | tr ',' ' '); do
-            TICKET_LIST="$TICKET_LIST• <${{ inputs.jira-base-url }}/browse/$ticket|$ticket>\n"
+            TICKET_LIST="${TICKET_LIST}• <${{ inputs.jira-base-url }}/browse/$ticket|$ticket>\n"
           done
         fi
         
+        PAYLOAD=$(cat <<SLACKJSON
+{
+  "channel": "${{ inputs.slack-channel }}",
+  "text": "🚢 Deployment Request Created",
+  "attachments": [{
+    "color": "warning",
+    "fields": [
+      {"title": "Environment", "value": "${{ inputs.environment }}", "short": true},
+      {"title": "Release", "value": "${{ inputs.release-version }}", "short": true},
+      {"title": "Repository", "value": "${{ github.repository }}", "short": true},
+      {"title": "Issue", "value": "<https://github.com/${{ github.repository }}/issues/${{ steps.create-issue.outputs.issue-number }}|#${{ steps.create-issue.outputs.issue-number }}>", "short": true}
+    ],
+    "text": "*JIRA Tickets:*\n${TICKET_LIST}"
+  }]
+}
+SLACKJSON
+)
+        
         curl -X POST "${{ inputs.slack-webhook-url }}" \
           -H "Content-Type: application/json" \
-          -d "{
-            \"channel\": \"${{ inputs.slack-channel }}\",
-            \"text\": \"🚢 Deployment Request Created\",
-            \"attachments\": [{
-              \"color\": \"warning\",
-              \"fields\": [
-                {\"title\": \"Environment\", \"value\": \"${{ inputs.environment }}\", \"short\": true},
-                {\"title\": \"Release\", \"value\": \"${{ inputs.release-version }}\", \"short\": true},
-                {\"title\": \"Repository\", \"value\": \"${{ github.repository }}\", \"short\": true},
-                {\"title\": \"Issue\", \"value\": \"<https://github.com/${{ github.repository }}/issues/${{ steps.create-issue.outputs.issue-number }}|#${{ steps.create-issue.outputs.issue-number }}>\", \"short\": true}
-              ],
-              \"text\": \"*JIRA Tickets:*\\n$TICKET_LIST\"
-            }]
-          }" || echo "Failed to send Slack notification (non-critical)"
+          -d "$PAYLOAD" || echo "Failed to send Slack notification (non-critical)"
 
     - name: Wait for approval
       if: inputs.requires-approval == 'true'
@@ -180,16 +195,13 @@ Command: \`${{ inputs.approval-command }}\`
         echo "   Approved by: ${{ inputs.approved-by }}"
         echo "   Approval command: ${{ inputs.approval-command }}"
         
-        # In a real scenario, this would poll the issue for approval comments
-        # For demo, we'll simulate a 30-second wait
         sleep 30
         
         echo "✅ Approval received (simulated)"
         
-        # Update issue with approval status
         gh api repos/${{ github.repository }}/issues/${{ steps.create-issue.outputs.issue-number }}/comments \
           --method POST \
-          --field body="✅ **Approval received** (simulated for demo)
+          --field "body=✅ **Approval received** (simulated for demo)
 
 Proceeding with deployment to \`${{ inputs.environment }}\`..." || echo "Failed to update issue (non-critical)"
 
@@ -238,7 +250,6 @@ Proceeding with deployment to \`${{ inputs.environment }}\`..." || echo "Failed 
         echo "🚢 Deploying to ${{ inputs.environment }} environment..."
         echo "   Release: ${{ inputs.release-version }}"
         
-        # Simulate deployment steps
         echo "   📦 Building Docker image..."
         sleep 2
         echo "   🏗️ Applying Kubernetes manifests..."
@@ -248,7 +259,6 @@ Proceeding with deployment to \`${{ inputs.environment }}\`..." || echo "Failed 
         echo "   🌐 Updating ingress configuration..."
         sleep 1
         
-        # Set deployment URL based on environment
         case "${{ inputs.environment }}" in
           prod)
             DEPLOY_URL="https://app.galileu.com"
@@ -301,7 +311,7 @@ Proceeding with deployment to \`${{ inputs.environment }}\`..." || echo "Failed 
         HOOK_PATH="${{ inputs.after-release-hook }}"
         if [ -f "$HOOK_PATH/action.yml" ] || [ -f "$HOOK_PATH/run.sh" ]; then
           echo "✅ Found after-release hook at $HOOK_PATH"
-          echo "�� Running after-release tasks..."
+          echo "🎉 Running after-release tasks..."
           if [ -f "$HOOK_PATH/run.sh" ]; then
             chmod +x "$HOOK_PATH/run.sh"
             "$HOOK_PATH/run.sh" "${{ inputs.release-version }}" "${{ inputs.environment }}" "${{ steps.deploy.outputs.url }}"
@@ -322,19 +332,29 @@ Proceeding with deployment to \`${{ inputs.environment }}\`..." || echo "Failed 
       run: |
         echo "📋 Updating deployment issue..."
         
-        gh api repos/${{ github.repository }}/issues/${{ steps.create-issue.outputs.issue-number }}/comments \
-          --method POST \
-          --field body="🎉 **Deployment completed successfully!**
+        cat > /tmp/success-comment.txt << 'SUCCESSBODY'
+🎉 **Deployment completed successfully!**
 
-**Environment:** \`${{ inputs.environment }}\`
-**Release:** \`${{ inputs.release-version }}\`
-**URL:** ${{ steps.deploy.outputs.url }}
+**Environment:** ENV_PLACEHOLDER
+**Release:** RELEASE_PLACEHOLDER
+**URL:** URL_PLACEHOLDER
 **Status:** ✅ Success
 
 ---
-*Deployment pipeline completed at $(date)*" || echo "Failed to update issue (non-critical)"
+*Deployment pipeline completed at TIMESTAMP_PLACEHOLDER*
+SUCCESSBODY
         
-        # Close the issue
+        sed -i.bak "s|ENV_PLACEHOLDER|\`${{ inputs.environment }}\`|g" /tmp/success-comment.txt
+        sed -i.bak "s|RELEASE_PLACEHOLDER|\`${{ inputs.release-version }}\`|g" /tmp/success-comment.txt
+        sed -i.bak "s|URL_PLACEHOLDER|${{ steps.deploy.outputs.url }}|g" /tmp/success-comment.txt
+        sed -i.bak "s|TIMESTAMP_PLACEHOLDER|$(date)|g" /tmp/success-comment.txt
+        
+        COMMENT_BODY=$(cat /tmp/success-comment.txt)
+        
+        gh api repos/${{ github.repository }}/issues/${{ steps.create-issue.outputs.issue-number }}/comments \
+          --method POST \
+          --field "body=$COMMENT_BODY" || echo "Failed to update issue (non-critical)"
+        
         gh api repos/${{ github.repository }}/issues/${{ steps.create-issue.outputs.issue-number }} \
           --method PATCH \
           --field state=closed || echo "Failed to close issue (non-critical)"
@@ -349,26 +369,31 @@ Proceeding with deployment to \`${{ inputs.environment }}\`..." || echo "Failed 
         TICKET_LIST=""
         if [ -n "$TICKETS" ]; then
           for ticket in $(echo $TICKETS | tr ',' ' '); do
-            TICKET_LIST="$TICKET_LIST• <${{ inputs.jira-base-url }}/browse/$ticket|$ticket>\n"
+            TICKET_LIST="${TICKET_LIST}• <${{ inputs.jira-base-url }}/browse/$ticket|$ticket>\n"
           done
         fi
         
+        PAYLOAD=$(cat <<SLACKJSON
+{
+  "channel": "${{ inputs.slack-channel }}",
+  "text": "✅ Deployment Successful",
+  "attachments": [{
+    "color": "good",
+    "fields": [
+      {"title": "Environment", "value": "${{ inputs.environment }}", "short": true},
+      {"title": "Release", "value": "${{ inputs.release-version }}", "short": true},
+      {"title": "URL", "value": "<${{ steps.deploy.outputs.url }}|${{ steps.deploy.outputs.url }}>", "short": true},
+      {"title": "Repository", "value": "${{ github.repository }}", "short": true}
+    ],
+    "text": "*JIRA Tickets:*\n${TICKET_LIST}"
+  }]
+}
+SLACKJSON
+)
+        
         curl -X POST "${{ inputs.slack-webhook-url }}" \
           -H "Content-Type: application/json" \
-          -d "{
-            \"channel\": \"${{ inputs.slack-channel }}\",
-            \"text\": \"✅ Deployment Successful\",
-            \"attachments\": [{
-              \"color\": \"good\",
-              \"fields\": [
-                {\"title\": \"Environment\", \"value\": \"${{ inputs.environment }}\", \"short\": true},
-                {\"title\": \"Release\", \"value\": \"${{ inputs.release-version }}\", \"short\": true},
-                {\"title\": \"URL\", \"value\": \"<${{ steps.deploy.outputs.url }}|${{ steps.deploy.outputs.url }}>\", \"short\": true},
-                {\"title\": \"Repository\", \"value\": \"${{ github.repository }}\", \"short\": true}
-              ],
-              \"text\": \"*JIRA Tickets:*\\n$TICKET_LIST\"
-            }]
-          }" || echo "Failed to send Slack notification (non-critical)"
+          -d "$PAYLOAD" || echo "Failed to send Slack notification (non-critical)"
 
     - name: Deployment summary
       shell: bash
